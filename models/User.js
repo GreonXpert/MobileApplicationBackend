@@ -1,40 +1,97 @@
-// models/User.js
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
 
-/**
- * User Schema
- * 
- * This model is NOT stored in the database for this application.
- * Instead, Admin and Superadmin credentials are configured in .env file.
- * This schema serves as a reference for the structure we use in authentication.
- * 
- * In a production system, you might want to store these in the database,
- * but per requirements, we're using environment variables for simplicity.
- */
 const userSchema = new mongoose.Schema({
   username: {
     type: String,
-    required: true,
+    required: [true, 'Username is required'],
     unique: true,
     trim: true,
+    lowercase: true,
+    minlength: [3, 'Username must be at least 3 characters long']
   },
-  passwordHash: {
+  password: {
     type: String,
-    required: true,
+    required: [true, 'Password is required'],
+    minlength: [6, 'Password must be at least 6 characters long']
+  },
+  email: {
+    type: String,
+    required: [true, 'Email is required'],
+    unique: true,
+    trim: true,
+    lowercase: true,
+    match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address']
+  },
+  fullName: {
+    type: String,
+    required: [true, 'Full name is required'],
+    trim: true
+  },
+  phone: {
+    type: String,
+    trim: true
   },
   role: {
     type: String,
-    enum: ['ADMIN', 'SUPERADMIN'],
-    required: true,
+    enum: ['superadmin', 'admin', 'user', 'employee'],
+    default: 'user'
+  },
+  isActive: {
+    type: Boolean,
+    default: true
   },
   createdAt: {
     type: Date,
-    default: Date.now,
+    default: Date.now
   },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  },
+  lastLogin: {
+    type: Date
+  }
 }, {
-  timestamps: true,
+  timestamps: true
 });
 
-// Note: We're exporting this schema but not actively using it
-// since users are configured via .env
-module.exports = mongoose.model('User', userSchema);
+// Hash password before saving
+userSchema.pre('save', async function(next) {
+  // Only hash the password if it has been modified (or is new)
+  if (!this.isModified('password')) {
+    return next();
+  }
+
+  try {
+    // Generate salt
+    const salt = await bcrypt.genSalt(10);
+    
+    // Hash password
+    this.password = await bcrypt.hash(this.password, salt);
+    
+    next();
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Method to compare password for login
+userSchema.methods.comparePassword = async function(candidatePassword) {
+  try {
+    return await bcrypt.compare(candidatePassword, this.password);
+  } catch (error) {
+    throw error;
+  }
+};
+
+// Method to hide password in JSON responses
+userSchema.methods.toJSON = function() {
+  const obj = this.toObject();
+  delete obj.password;
+  return obj;
+};
+
+const User = mongoose.model('User', userSchema);
+
+module.exports = User;
