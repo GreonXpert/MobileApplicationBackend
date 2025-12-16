@@ -51,54 +51,40 @@ const authenticateToken = (req, res, next) => {
  * @param {Function} next - Express next middleware function
  */
 const requireAdmin = (req, res, next) => {
-  // Check if user object exists (should be set by authenticateToken)
   if (!req.user) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required.',
-    });
+    return res.status(401).json({ success: false, message: 'Authentication required.' });
   }
 
-  // Check if user has ADMIN role
-  if (req.user.role !== 'ADMIN') {
+  const role = String(req.user.role || '').trim().toLowerCase();
+
+  // allow admin and superadmin to access admin routes
+  if (role !== 'admin' && role !== 'superadmin') {
     return res.status(403).json({
       success: false,
       message: 'Access denied. Admin privileges required.',
     });
   }
 
-  // User is an admin, continue
   next();
 };
 
-/**
- * Middleware to check if user has SUPERADMIN role
- * Must be used after authenticateToken middleware
- * 
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware function
- */
 const requireSuperadmin = (req, res, next) => {
-  // Check if user object exists (should be set by authenticateToken)
   if (!req.user) {
-    return res.status(401).json({
-      success: false,
-      message: 'Authentication required.',
-    });
+    return res.status(401).json({ success: false, message: 'Authentication required.' });
   }
 
-  // Check if user has SUPERADMIN role
-  if (req.user.role !== 'SUPERADMIN') {
+  const role = String(req.user.role || '').trim().toLowerCase();
+
+  if (role !== 'superadmin') {
     return res.status(403).json({
       success: false,
       message: 'Access denied. Superadmin privileges required.',
     });
   }
 
-  // User is a superadmin, continue
   next();
 };
+
 
 module.exports = {
   authenticateToken,
