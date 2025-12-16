@@ -336,4 +336,340 @@ router.get('/attendance/history/:employeeId', async (req, res) => {
   }
 });
 
+/**
+ * @route   GET /api/admin/dashboard/stats
+ * @desc    Get dashboard statistics (today's attendance, monthly summary, etc.)
+ * @access  Admin only
+ */
+router.get('/dashboard/stats', async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    // Get total employees
+    const totalEmployees = await Employee.countDocuments();
+
+    // Get today's attendance
+    const todayAttendance = await Attendance.find({
+      date: { $gte: today, $lt: tomorrow }
+    });
+
+    const todayPresent = todayAttendance.filter(a => a.status === 'PRESENT').length;
+    const todayAbsent = todayAttendance.filter(a => a.status === 'ABSENT').length;
+    const todayLate = todayAttendance.filter(a => a.status === 'LATE').length;
+    const todayHalfDay = todayAttendance.filter(a => a.status === 'HALF_DAY').length;
+    const todayNotMarked = totalEmployees - todayAttendance.length;
+
+    // Get this month's stats
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    monthEnd.setHours(23, 59, 59, 999);
+
+    const monthlyAttendance = await Attendance.find({
+      date: { $gte: monthStart, $lte: monthEnd }
+    });
+
+    const monthlyPresent = monthlyAttendance.filter(a => a.status === 'PRESENT').length;
+    const monthlyAbsent = monthlyAttendance.filter(a => a.status === 'ABSENT').length;
+    const monthlyLate = monthlyAttendance.filter(a => a.status === 'LATE').length;
+    const monthlyHalfDay = monthlyAttendance.filter(a => a.status === 'HALF_DAY').length;
+
+    // Get department-wise breakdown
+    const departments = await Employee.distinct('department');
+    const departmentStats = [];
+
+    for (const dept of departments) {
+      const deptEmployees = await Employee.countDocuments({ department: dept });
+      const deptTodayAttendance = todayAttendance.filter(a => a.department === dept);
+      const deptPresent = deptTodayAttendance.filter(a => a.status === 'PRESENT').length;
+
+      departmentStats.push({
+        department: dept,
+        totalEmployees: deptEmployees,
+        presentToday: deptPresent,
+        attendanceRate: deptEmployees > 0 ? ((deptPresent / deptEmployees) * 100).toFixed(2) : 0
+      });
+    }
+
+    res.json({
+      success: true,
+      stats: {
+        totalEmployees,
+        today: {
+          date: today.toISOString(),
+          present: todayPresent,
+          absent: todayAbsent,
+          late: todayLate,
+          halfDay: todayHalfDay,
+          notMarked: todayNotMarked,
+          attendanceRate: totalEmployees > 0 ? ((todayPresent / totalEmployees) * 100).toFixed(2) : 0
+        },
+        monthly: {
+          month: today.toLocaleString('default', { month: 'long', year: 'numeric' }),
+          present: monthlyPresent,
+          absent: monthlyAbsent,
+          late: monthlyLate,
+          halfDay: monthlyHalfDay,
+          totalMarked: monthlyAttendance.length
+        },
+        departments: departmentStats
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching dashboard stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching dashboard statistics',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   GET /api/admin/dashboard/daily-attendance
+ * @desc    Get daily attendance with all employee details
+ * @access  Admin only
+ */
+router.get('/dashboard/daily-attendance', async (req, res) => {
+  try {
+    const { date } = req.query;
+    
+    let targetDate = date ? new Date(date) : new Date();
+    targetDate.setHours(0, 0, 0, 0);
+    const nextDay = new Date(targetDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+
+    // Get all employees
+    const allEmployees = await Employee.find()
+      .select('-fingerprintTemplate')
+      .sort({ department: 1, name: 1 });
+
+    // Get attendance for the target date
+    const attendanceRecords = await Attendance.find({
+      date: { $gte: targetDate, $lt: nextDay }
+    });
+
+    // Create a map of employee attendance
+    const attendanceMap = {};
+    attendanceRecords.forEach(record => {
+      attendanceMap[record.employeeId] = {
+        status: record.status,
+        markedAt: record.createdAt,
+        markedBy: record.markedBy,
+        location: record.location,
+        _id: record._id
+      };
+    });
+
+    // Combine employee data with attendance
+    const dailyAttendance = allEmployees.map(employee => {
+      const attendance = attendanceMap[employee.employeeId];
+      return {
+        _id: employee._id,
+        employeeId: employee.employeeId,
+        name: employee.name,
+        department: employee.department,
+        jobRole: employee.jobRole,
+        baseLocation: employee.baseLocation,
+        attendance: attendance ? {
+          status: attendance.status,
+          markedAt: attendance.markedAt,
+          markedBy: attendance.markedBy,
+          location: attendance.location,
+          attendanceId: attendance._id
+        } : {
+          status: 'NOT_MARKED',
+          markedAt: null,
+          markedBy: null,
+          location: null,
+          attendanceId: null
+        }
+      };
+    });
+
+    // Calculate summary
+    const summary = {
+      total: allEmployees.length,
+      present: attendanceRecords.filter(a => a.status === 'PRESENT').length,
+      absent: attendanceRecords.filter(a => a.status === 'ABSENT').length,
+      late: attendanceRecords.filter(a => a.status === 'LATE').length,
+      halfDay: attendanceRecords.filter(a => a.status === 'HALF_DAY').length,
+      notMarked: allEmployees.length - attendanceRecords.length
+    };
+
+    res.json({
+      success: true,
+      date: targetDate.toISOString(),
+      summary,
+      employees: dailyAttendance
+    });
+
+  } catch (error) {
+    console.error('Error fetching daily attendance:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching daily attendance',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   GET /api/admin/dashboard/employee-history/:employeeId
+ * @desc    Get complete attendance history for a specific employee
+ * @access  Admin only
+ */
+router.get('/dashboard/employee-history/:employeeId', async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { startDate, endDate, limit = 30 } = req.query;
+
+    // Find employee
+    const employee = await Employee.findOne({ employeeId })
+      .select('-fingerprintTemplate');
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: `Employee with ID ${employeeId} not found`
+      });
+    }
+
+    // Build query
+    let query = { employeeId };
+
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
+    }
+
+    // Fetch attendance records
+    const attendanceRecords = await Attendance.find(query)
+      .sort({ date: -1 })
+      .limit(parseInt(limit));
+
+    // Calculate statistics
+    const totalRecords = attendanceRecords.length;
+    const presentCount = attendanceRecords.filter(r => r.status === 'PRESENT').length;
+    const absentCount = attendanceRecords.filter(r => r.status === 'ABSENT').length;
+    const lateCount = attendanceRecords.filter(r => r.status === 'LATE').length;
+    const halfDayCount = attendanceRecords.filter(r => r.status === 'HALF_DAY').length;
+
+    const attendanceRate = totalRecords > 0 
+      ? ((presentCount / totalRecords) * 100).toFixed(2) 
+      : 0;
+
+    res.json({
+      success: true,
+      employee: {
+        _id: employee._id,
+        employeeId: employee.employeeId,
+        name: employee.name,
+        department: employee.department,
+        jobRole: employee.jobRole,
+        baseLocation: employee.baseLocation
+      },
+      statistics: {
+        totalRecords,
+        present: presentCount,
+        absent: absentCount,
+        late: lateCount,
+        halfDay: halfDayCount,
+        attendanceRate: `${attendanceRate}%`
+      },
+      history: attendanceRecords.map(record => ({
+        _id: record._id,
+        date: record.date,
+        status: record.status,
+        location: record.location,
+        markedBy: record.markedBy,
+        markedAt: record.createdAt
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error fetching employee history:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching employee history',
+      error: error.message
+    });
+  }
+});
+
+/**
+ * @route   GET /api/admin/dashboard/monthly-report
+ * @desc    Get monthly attendance report with date-wise breakdown
+ * @access  Admin only
+ */
+router.get('/dashboard/monthly-report', async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    
+    const targetYear = year ? parseInt(year) : new Date().getFullYear();
+    const targetMonth = month ? parseInt(month) - 1 : new Date().getMonth();
+
+    const monthStart = new Date(targetYear, targetMonth, 1);
+    const monthEnd = new Date(targetYear, targetMonth + 1, 0);
+    monthEnd.setHours(23, 59, 59, 999);
+
+    // Get all attendance for the month
+    const monthlyAttendance = await Attendance.find({
+      date: { $gte: monthStart, $lte: monthEnd }
+    }).sort({ date: 1 });
+
+    // Group by date
+    const dateWiseAttendance = {};
+    monthlyAttendance.forEach(record => {
+      const dateKey = record.date.toISOString().split('T')[0];
+      if (!dateWiseAttendance[dateKey]) {
+        dateWiseAttendance[dateKey] = {
+          date: dateKey,
+          present: 0,
+          absent: 0,
+          late: 0,
+          halfDay: 0,
+          total: 0
+        };
+      }
+      dateWiseAttendance[dateKey][record.status.toLowerCase().replace('_', '')] += 1;
+      dateWiseAttendance[dateKey].total += 1;
+    });
+
+    const dateWiseReport = Object.values(dateWiseAttendance);
+
+    // Overall month statistics
+    const totalPresent = monthlyAttendance.filter(a => a.status === 'PRESENT').length;
+    const totalAbsent = monthlyAttendance.filter(a => a.status === 'ABSENT').length;
+    const totalLate = monthlyAttendance.filter(a => a.status === 'LATE').length;
+    const totalHalfDay = monthlyAttendance.filter(a => a.status === 'HALF_DAY').length;
+
+    res.json({
+      success: true,
+      month: monthStart.toLocaleString('default', { month: 'long', year: 'numeric' }),
+      summary: {
+        totalRecords: monthlyAttendance.length,
+        present: totalPresent,
+        absent: totalAbsent,
+        late: totalLate,
+        halfDay: totalHalfDay
+      },
+      dateWiseReport
+    });
+
+  } catch (error) {
+    console.error('Error fetching monthly report:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching monthly report',
+      error: error.message
+    });
+  }
+});
+
+
 module.exports = router;
