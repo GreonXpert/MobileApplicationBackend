@@ -85,9 +85,39 @@ const requireSuperadmin = (req, res, next) => {
   next();
 };
 
+/**
+ * Middleware factory to check if user has any of the specified roles
+ * @param {...string} roles - Allowed roles (e.g., 'admin', 'superadmin')
+ * @returns {Function} Express middleware function
+ */
+const authorize = (...roles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Authentication required.' 
+      });
+    }
 
+    const userRole = String(req.user.role || '').trim().toLowerCase();
+    const allowedRoles = roles.map(role => role.toLowerCase());
+
+    if (!allowedRoles.includes(userRole)) {
+      return res.status(403).json({
+        success: false,
+        message: `Access denied. Required role: ${roles.join(' or ')}`,
+      });
+    }
+
+    next();
+  };
+};
+
+// Export both naming conventions for compatibility
 module.exports = {
   authenticateToken,
   requireAdmin,
   requireSuperadmin,
+  protect: authenticateToken,  // Alias for authenticateToken
+  authorize,                    // Role-based authorization
 };

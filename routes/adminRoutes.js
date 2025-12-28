@@ -10,19 +10,14 @@ const router = express.Router();
 router.use(authenticateToken);
 router.use(requireAdmin);
 
+// ============================================
+// EMPLOYEE MANAGEMENT ROUTES
+// ============================================
+
 /**
  * @route   POST /api/admin/employees
  * @desc    Create a new employee
  * @access  Admin only
- * 
- * Body: {
- *   name: string,
- *   employeeId: string,
- *   jobRole: string,
- *   department: string,
- *   fingerprintTemplate: string,
- *   baseLocation: { latitude: number, longitude: number }
- * }
  */
 router.post('/employees', async (req, res) => {
   try {
@@ -33,13 +28,15 @@ router.post('/employees', async (req, res) => {
       department,
       fingerprintTemplate,
       baseLocation,
+      phone,
+      email,
     } = req.body;
 
     // Validate required fields
     if (!name || !employeeId || !jobRole || !department || !fingerprintTemplate) {
       return res.status(400).json({
         success: false,
-        message: 'All fields are required: name, employeeId, jobRole, department, fingerprintTemplate',
+        message: 'Required fields: name, employeeId, jobRole, department, fingerprintTemplate',
       });
     }
 
@@ -65,18 +62,18 @@ router.post('/employees', async (req, res) => {
       employeeId,
       jobRole,
       department,
-      fingerprintTemplate, // Stored as-is from MFS100/Precision PB100 SDK
+      phone,
+      email,
+      fingerprintTemplate,
       baseLocation: {
         latitude: baseLocation.latitude,
         longitude: baseLocation.longitude,
       },
-      createdBy: req.user.username, // From JWT token
+      createdBy: req.user.username,
     });
 
-    // Save to database
     await employee.save();
 
-    // Return success response (excluding sensitive fingerprint data)
     res.status(201).json({
       success: true,
       message: 'Employee created successfully',
@@ -86,6 +83,8 @@ router.post('/employees', async (req, res) => {
         employeeId: employee.employeeId,
         jobRole: employee.jobRole,
         department: employee.department,
+        phone: employee.phone,
+        email: employee.email,
         baseLocation: employee.baseLocation,
         createdBy: employee.createdBy,
         createdAt: employee.createdAt,
@@ -104,19 +103,48 @@ router.post('/employees', async (req, res) => {
 
 /**
  * @route   GET /api/admin/employees
- * @desc    Get list of all employees
+ * @desc    Get list of all employees with optional filters
  * @access  Admin only
  */
 router.get('/employees', async (req, res) => {
   try {
-    // Fetch all employees, excluding fingerprint templates from response
-    const employees = await Employee.find()
-      .select('-fingerprintTemplate') // Exclude fingerprint from list view
-      .sort({ createdAt: -1 }); // Most recent first
+    const { department, search, limit, page } = req.query;
+
+    // Build query
+    let query = {};
+    
+    if (department) {
+      query.department = department;
+    }
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { employeeId: { $regex: search, $options: 'i' } },
+        { jobRole: { $regex: search, $options: 'i' } },
+      ];
+    }
+
+    // Pagination
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 50;
+    const skip = (pageNum - 1) * limitNum;
+
+    // Fetch employees
+    const employees = await Employee.find(query)
+      .select('-fingerprintTemplate')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limitNum);
+
+    const total = await Employee.countDocuments(query);
 
     res.json({
       success: true,
       count: employees.length,
+      total: total,
+      page: pageNum,
+      totalPages: Math.ceil(total / limitNum),
       employees: employees,
     });
 
@@ -138,7 +166,7 @@ router.get('/employees', async (req, res) => {
 router.get('/employees/:id', async (req, res) => {
   try {
     const employee = await Employee.findById(req.params.id)
-      .select('-fingerprintTemplate'); // Exclude fingerprint from detail view
+      .select('-fingerprintTemplate');
 
     if (!employee) {
       return res.status(404).json({
@@ -147,9 +175,27 @@ router.get('/employees/:id', async (req, res) => {
       });
     }
 
+    // Get attendance statistics
+    const attendanceRecords = await Attendance.find({ 
+      employeeId: employee.employeeId 
+    });
+
+    const stats = {
+      totalRecords: attendanceRecords.length,
+      present: attendanceRecords.filter(r => r.status === 'PRESENT').length,
+      absent: attendanceRecords.filter(r => r.status === 'ABSENT').length,
+      late: attendanceRecords.filter(r => r.status === 'LATE').length,
+      halfDay: attendanceRecords.filter(r => r.status === 'HALF_DAY').length,
+    };
+
+    stats.attendanceRate = stats.totalRecords > 0 
+      ? ((stats.present / stats.totalRecords) * 100).toFixed(2) 
+      : 0;
+
     res.json({
       success: true,
       employee: employee,
+      statistics: stats,
     });
 
   } catch (error) {
@@ -163,22 +209,133 @@ router.get('/employees/:id', async (req, res) => {
 });
 
 /**
+ * @route   PUT /api/admin/employees/:id
+ * @desc    Update employee details
+ * @access  Admin only
+ */
+router.put('/employees/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      jobRole,
+      department,
+      phone,
+      email,
+      baseLocation,
+      fingerprintTemplate,
+    } = req.body;
+
+    // Find employee
+    const employee = await Employee.findById(id);
+    
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: 'Employee not found',
+      });
+    }
+
+    // Update fields if provided
+    if (name) employee.name = name;
+    if (jobRole) employee.jobRole = jobRole;
+    if (department) employee.department = department;
+    if (phone) employee.phone = phone;
+    if (email) employee.email = email;
+    if (fingerprintTemplate) employee.fingerprintTemplate = fingerprintTemplate;
+    
+    if (baseLocation && baseLocation.latitude && baseLocation.longitude) {
+      employee.baseLocation = {
+        latitude: baseLocation.latitude,
+        longitude: baseLocation.longitude,
+      };
+    }
+
+    await employee.save();
+
+    res.json({
+      success: true,
+      message: 'Employee updated successfully',
+      employee: {
+        _id: employee._id,
+        name: employee.name,
+        employeeId: employee.employeeId,
+        jobRole: employee.jobRole,
+        department: employee.department,
+        phone: employee.phone,
+        email: employee.email,
+        baseLocation: employee.baseLocation,
+        updatedAt: employee.updatedAt,
+      },
+    });
+
+  } catch (error) {
+    console.error('Error updating employee:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while updating employee',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * @route   DELETE /api/admin/employees/:id
+ * @desc    Delete an employee
+ * @access  Admin only
+ */
+router.delete('/employees/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const employee = await Employee.findById(id);
+    
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        message: 'Employee not found',
+      });
+    }
+
+    // Check if employee has attendance records
+    const attendanceCount = await Attendance.countDocuments({ 
+      employeeId: employee.employeeId 
+    });
+
+    // Delete employee
+    await Employee.findByIdAndDelete(id);
+
+    res.json({
+      success: true,
+      message: 'Employee deleted successfully',
+      deletedEmployee: {
+        employeeId: employee.employeeId,
+        name: employee.name,
+        attendanceRecordsCount: attendanceCount,
+      },
+      note: attendanceCount > 0 
+        ? `${attendanceCount} attendance records still exist for this employee in the database`
+        : 'No attendance records found for this employee',
+    });
+
+  } catch (error) {
+    console.error('Error deleting employee:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while deleting employee',
+      error: error.message,
+    });
+  }
+});
+
+// ============================================
+// ATTENDANCE MANAGEMENT ROUTES
+// ============================================
+
+/**
  * @route   POST /api/admin/attendance/mark
  * @desc    Mark attendance for an employee
  * @access  Admin only
- * 
- * Body: {
- *   employeeId: string,
- *   date: string (ISO date),
- *   status: string ('PRESENT' | 'ABSENT' | 'HALF_DAY' | 'LATE'),
- *   location: { latitude: number, longitude: number }
- * }
- * 
- * Flow:
- * 1. Find employee by employeeId
- * 2. Retrieve fingerprint template from employee record
- * 3. Create attendance record with all details including fingerprint
- * 4. Save to database (accessible by Superadmin via their routes)
  */
 router.post('/attendance/mark', async (req, res) => {
   try {
@@ -199,7 +356,16 @@ router.post('/attendance/mark', async (req, res) => {
       });
     }
 
-    // Find employee by employeeId
+    // Validate status
+    const validStatuses = ['PRESENT', 'ABSENT', 'HALF_DAY', 'LATE'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`,
+      });
+    }
+
+    // Find employee
     const employee = await Employee.findOne({ employeeId });
     
     if (!employee) {
@@ -218,13 +384,13 @@ router.post('/attendance/mark', async (req, res) => {
       });
     }
 
-    // Check if attendance already marked for this employee on this date
+    // Check if attendance already marked
+    const startOfDay = new Date(attendanceDate.setHours(0, 0, 0, 0));
+    const endOfDay = new Date(attendanceDate.setHours(23, 59, 59, 999));
+
     const existingAttendance = await Attendance.findOne({
       employeeId: employeeId,
-      date: {
-        $gte: new Date(attendanceDate.setHours(0, 0, 0, 0)),
-        $lt: new Date(attendanceDate.setHours(23, 59, 59, 999)),
-      },
+      date: { $gte: startOfDay, $lt: endOfDay },
     });
 
     if (existingAttendance) {
@@ -240,7 +406,6 @@ router.post('/attendance/mark', async (req, res) => {
     }
 
     // Create attendance record
-    // Including fingerprint template from employee record
     const attendance = new Attendance({
       employee: employee._id,
       employeeId: employee.employeeId,
@@ -249,20 +414,16 @@ router.post('/attendance/mark', async (req, res) => {
       jobRole: employee.jobRole,
       date: attendanceDate,
       status: status,
-      fingerprintTemplate: employee.fingerprintTemplate, // Copy from employee
+      fingerprintTemplate: employee.fingerprintTemplate,
       location: {
         latitude: location.latitude,
         longitude: location.longitude,
       },
-      markedBy: req.user.username, // Admin username from JWT
+      markedBy: req.user.username,
     });
 
-    // Save attendance record
     await attendance.save();
 
-    // Return success response
-    // Note: Fingerprint template is now stored in Attendance collection
-    // and is accessible to Superadmin via /api/superadmin/attendance routes
     res.status(201).json({
       success: true,
       message: 'Attendance marked successfully',
@@ -271,7 +432,6 @@ router.post('/attendance/mark', async (req, res) => {
         employeeId: attendance.employeeId,
         employeeName: attendance.employeeName,
         department: attendance.department,
-        jobRole: attendance.jobRole,
         date: attendance.date,
         status: attendance.status,
         location: attendance.location,
@@ -298,26 +458,20 @@ router.post('/attendance/mark', async (req, res) => {
 router.get('/attendance/history/:employeeId', async (req, res) => {
   try {
     const { employeeId } = req.params;
-    const { startDate, endDate } = req.query;
+    const { startDate, endDate, limit = 100 } = req.query;
 
-    // Build query
     let query = { employeeId };
 
-    // Add date range filter if provided
     if (startDate || endDate) {
       query.date = {};
-      if (startDate) {
-        query.date.$gte = new Date(startDate);
-      }
-      if (endDate) {
-        query.date.$lte = new Date(endDate);
-      }
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
     }
 
-    // Fetch attendance records
     const attendanceRecords = await Attendance.find(query)
-      .select('-fingerprintTemplate') // Exclude fingerprint from response
-      .sort({ date: -1 }); // Most recent first
+      .select('-fingerprintTemplate')
+      .sort({ date: -1 })
+      .limit(parseInt(limit));
 
     res.json({
       success: true,
@@ -337,21 +491,129 @@ router.get('/attendance/history/:employeeId', async (req, res) => {
 });
 
 /**
+ * @route   PUT /api/admin/attendance/:id
+ * @desc    Update attendance record
+ * @access  Admin only
+ */
+router.put('/attendance/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status) {
+      return res.status(400).json({
+        success: false,
+        message: 'Status is required',
+      });
+    }
+
+    const validStatuses = ['PRESENT', 'ABSENT', 'HALF_DAY', 'LATE'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`,
+      });
+    }
+
+    const attendance = await Attendance.findById(id);
+    
+    if (!attendance) {
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance record not found',
+      });
+    }
+
+    const oldStatus = attendance.status;
+    attendance.status = status;
+    await attendance.save();
+
+    res.json({
+      success: true,
+      message: 'Attendance updated successfully',
+      attendance: {
+        _id: attendance._id,
+        employeeId: attendance.employeeId,
+        employeeName: attendance.employeeName,
+        date: attendance.date,
+        oldStatus: oldStatus,
+        newStatus: attendance.status,
+        updatedAt: attendance.updatedAt,
+      },
+    });
+
+  } catch (error) {
+    console.error('Error updating attendance:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while updating attendance',
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * @route   DELETE /api/admin/attendance/:id
+ * @desc    Delete attendance record
+ * @access  Admin only
+ */
+router.delete('/attendance/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const attendance = await Attendance.findById(id);
+    
+    if (!attendance) {
+      return res.status(404).json({
+        success: false,
+        message: 'Attendance record not found',
+      });
+    }
+
+    await Attendance.findByIdAndDelete(id);
+
+    res.json({
+      success: true,
+      message: 'Attendance record deleted successfully',
+      deletedAttendance: {
+        _id: attendance._id,
+        employeeId: attendance.employeeId,
+        employeeName: attendance.employeeName,
+        date: attendance.date,
+        status: attendance.status,
+      },
+    });
+
+  } catch (error) {
+    console.error('Error deleting attendance:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while deleting attendance',
+      error: error.message,
+    });
+  }
+});
+
+// ============================================
+// DASHBOARD & ANALYTICS ROUTES
+// ============================================
+
+/**
  * @route   GET /api/admin/dashboard/stats
- * @desc    Get dashboard statistics (today's attendance, monthly summary, etc.)
+ * @desc    Get comprehensive dashboard statistics
  * @access  Admin only
  */
 router.get('/dashboard/stats', async (req, res) => {
   try {
+    // Total employees
+    const totalEmployees = await Employee.countDocuments();
+
+    // Today's attendance stats
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    // Get total employees
-    const totalEmployees = await Employee.countDocuments();
-
-    // Get today's attendance
     const todayAttendance = await Attendance.find({
       date: { $gte: today, $lt: tomorrow }
     });
@@ -362,10 +624,9 @@ router.get('/dashboard/stats', async (req, res) => {
     const todayHalfDay = todayAttendance.filter(a => a.status === 'HALF_DAY').length;
     const todayNotMarked = totalEmployees - todayAttendance.length;
 
-    // Get this month's stats
+    // This month's stats
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-    const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-    monthEnd.setHours(23, 59, 59, 999);
+    const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0, 23, 59, 59);
 
     const monthlyAttendance = await Attendance.find({
       date: { $gte: monthStart, $lte: monthEnd }
@@ -376,20 +637,32 @@ router.get('/dashboard/stats', async (req, res) => {
     const monthlyLate = monthlyAttendance.filter(a => a.status === 'LATE').length;
     const monthlyHalfDay = monthlyAttendance.filter(a => a.status === 'HALF_DAY').length;
 
-    // Get department-wise breakdown
-    const departments = await Employee.distinct('department');
-    const departmentStats = [];
+    // Department-wise stats
+    const departments = await Employee.aggregate([
+      {
+        $group: {
+          _id: '$department',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
 
+    const departmentStats = [];
     for (const dept of departments) {
-      const deptEmployees = await Employee.countDocuments({ department: dept });
-      const deptTodayAttendance = todayAttendance.filter(a => a.department === dept);
-      const deptPresent = deptTodayAttendance.filter(a => a.status === 'PRESENT').length;
+      const deptEmployees = dept.count;
+      const deptAttendance = todayAttendance.filter(
+        a => a.department === dept._id
+      );
+      const deptPresent = deptAttendance.filter(a => a.status === 'PRESENT').length;
 
       departmentStats.push({
-        department: dept,
+        department: dept._id,
         totalEmployees: deptEmployees,
         presentToday: deptPresent,
-        attendanceRate: deptEmployees > 0 ? ((deptPresent / deptEmployees) * 100).toFixed(2) : 0
+        absentToday: deptEmployees - deptPresent,
+        attendanceRate: deptEmployees > 0 
+          ? ((deptPresent / deptEmployees) * 100).toFixed(2) 
+          : 0
       });
     }
 
@@ -404,7 +677,9 @@ router.get('/dashboard/stats', async (req, res) => {
           late: todayLate,
           halfDay: todayHalfDay,
           notMarked: todayNotMarked,
-          attendanceRate: totalEmployees > 0 ? ((todayPresent / totalEmployees) * 100).toFixed(2) : 0
+          attendanceRate: totalEmployees > 0 
+            ? ((todayPresent / totalEmployees) * 100).toFixed(2) 
+            : 0
         },
         monthly: {
           month: today.toLocaleString('default', { month: 'long', year: 'numeric' }),
@@ -423,7 +698,7 @@ router.get('/dashboard/stats', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error while fetching dashboard statistics',
-      error: error.message
+      error: error.message,
     });
   }
 });
@@ -519,7 +794,7 @@ router.get('/dashboard/daily-attendance', async (req, res) => {
 
 /**
  * @route   GET /api/admin/dashboard/employee-history/:employeeId
- * @desc    Get complete attendance history for a specific employee
+ * @desc    Get complete attendance history for a specific employee with stats
  * @access  Admin only
  */
 router.get('/dashboard/employee-history/:employeeId', async (req, res) => {
@@ -596,7 +871,7 @@ router.get('/dashboard/employee-history/:employeeId', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error while fetching employee history',
-      error: error.message
+      error: error.message,
     });
   }
 });
@@ -614,17 +889,16 @@ router.get('/dashboard/monthly-report', async (req, res) => {
     const targetMonth = month ? parseInt(month) - 1 : new Date().getMonth();
 
     const monthStart = new Date(targetYear, targetMonth, 1);
-    const monthEnd = new Date(targetYear, targetMonth + 1, 0);
-    monthEnd.setHours(23, 59, 59, 999);
+    const monthEnd = new Date(targetYear, targetMonth + 1, 0, 23, 59, 59);
 
     // Get all attendance for the month
-    const monthlyAttendance = await Attendance.find({
+    const attendanceRecords = await Attendance.find({
       date: { $gte: monthStart, $lte: monthEnd }
     }).sort({ date: 1 });
 
     // Group by date
     const dateWiseAttendance = {};
-    monthlyAttendance.forEach(record => {
+    attendanceRecords.forEach(record => {
       const dateKey = record.date.toISOString().split('T')[0];
       if (!dateWiseAttendance[dateKey]) {
         dateWiseAttendance[dateKey] = {
@@ -636,29 +910,38 @@ router.get('/dashboard/monthly-report', async (req, res) => {
           total: 0
         };
       }
-      dateWiseAttendance[dateKey][record.status.toLowerCase().replace('_', '')] += 1;
-      dateWiseAttendance[dateKey].total += 1;
+      dateWiseAttendance[dateKey][record.status.toLowerCase()] = 
+        (dateWiseAttendance[dateKey][record.status.toLowerCase()] || 0) + 1;
+      dateWiseAttendance[dateKey].total++;
     });
 
-    const dateWiseReport = Object.values(dateWiseAttendance);
+    const dailyBreakdown = Object.values(dateWiseAttendance);
 
     // Overall month statistics
-    const totalPresent = monthlyAttendance.filter(a => a.status === 'PRESENT').length;
-    const totalAbsent = monthlyAttendance.filter(a => a.status === 'ABSENT').length;
-    const totalLate = monthlyAttendance.filter(a => a.status === 'LATE').length;
-    const totalHalfDay = monthlyAttendance.filter(a => a.status === 'HALF_DAY').length;
+    const totalPresent = attendanceRecords.filter(r => r.status === 'PRESENT').length;
+    const totalAbsent = attendanceRecords.filter(r => r.status === 'ABSENT').length;
+    const totalLate = attendanceRecords.filter(r => r.status === 'LATE').length;
+    const totalHalfDay = attendanceRecords.filter(r => r.status === 'HALF_DAY').length;
 
     res.json({
       success: true,
-      month: monthStart.toLocaleString('default', { month: 'long', year: 'numeric' }),
+      period: {
+        month: monthStart.toLocaleString('default', { month: 'long' }),
+        year: targetYear,
+        startDate: monthStart.toISOString(),
+        endDate: monthEnd.toISOString()
+      },
       summary: {
-        totalRecords: monthlyAttendance.length,
+        totalRecords: attendanceRecords.length,
         present: totalPresent,
         absent: totalAbsent,
         late: totalLate,
-        halfDay: totalHalfDay
+        halfDay: totalHalfDay,
+        attendanceRate: attendanceRecords.length > 0 
+          ? ((totalPresent / attendanceRecords.length) * 100).toFixed(2) 
+          : 0
       },
-      dateWiseReport
+      dailyBreakdown
     });
 
   } catch (error) {
@@ -666,10 +949,80 @@ router.get('/dashboard/monthly-report', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error while fetching monthly report',
-      error: error.message
+      error: error.message,
     });
   }
 });
 
+/**
+ * @route   GET /api/admin/dashboard/department-wise
+ * @desc    Get department-wise attendance statistics
+ * @access  Admin only
+ */
+router.get('/dashboard/department-wise', async (req, res) => {
+  try {
+    const { date } = req.query;
+    
+    let targetDate = date ? new Date(date) : new Date();
+    targetDate.setHours(0, 0, 0, 0);
+    const nextDay = new Date(targetDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+
+    // Get all departments
+    const departments = await Employee.aggregate([
+      {
+        $group: {
+          _id: '$department',
+          totalEmployees: { $sum: 1 }
+        }
+      }
+    ]);
+
+    // Get attendance for the target date
+    const attendanceRecords = await Attendance.find({
+      date: { $gte: targetDate, $lt: nextDay }
+    });
+
+    // Calculate stats for each department
+    const departmentStats = departments.map(dept => {
+      const deptAttendance = attendanceRecords.filter(
+        a => a.department === dept._id
+      );
+
+      const present = deptAttendance.filter(a => a.status === 'PRESENT').length;
+      const absent = deptAttendance.filter(a => a.status === 'ABSENT').length;
+      const late = deptAttendance.filter(a => a.status === 'LATE').length;
+      const halfDay = deptAttendance.filter(a => a.status === 'HALF_DAY').length;
+      const notMarked = dept.totalEmployees - deptAttendance.length;
+
+      return {
+        department: dept._id,
+        totalEmployees: dept.totalEmployees,
+        present,
+        absent,
+        late,
+        halfDay,
+        notMarked,
+        attendanceRate: dept.totalEmployees > 0 
+          ? ((present / dept.totalEmployees) * 100).toFixed(2) 
+          : 0
+      };
+    });
+
+    res.json({
+      success: true,
+      date: targetDate.toISOString(),
+      departments: departmentStats
+    });
+
+  } catch (error) {
+    console.error('Error fetching department-wise stats:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching department-wise statistics',
+      error: error.message,
+    });
+  }
+});
 
 module.exports = router;
