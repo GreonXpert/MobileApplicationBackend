@@ -9,6 +9,7 @@ const connectDB = require('./config/db');
 const authRoutes = require('./routes/authRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const superadminRoutes = require('./routes/superadminRoutes');
+const fingerprintRoutes = require('./routes/fingerprintRoutes'); // ✅ NEW
 
 // ✅ Startup seeding
 const { ensureInitialUsers } = require('./controllers/setupController');
@@ -43,6 +44,7 @@ app.get('/', (req, res) => {
       auth: '/api/auth',
       admin: '/api/admin',
       superadmin: '/api/superadmin',
+      fingerprints: '/api/fingerprints', // ✅ NEW
       setup: '/api/setup',
     },
   });
@@ -52,6 +54,7 @@ app.get('/', (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/superadmin', superadminRoutes);
+app.use('/api/fingerprints', fingerprintRoutes); // ✅ NEW
 
 // Optional manual seed route (protected by SETUP_KEY if provided)
 app.use('/api/setup', setupRoutes);
