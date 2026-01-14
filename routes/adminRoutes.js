@@ -1,6 +1,7 @@
 // routes/adminRoutes.js
 const express = require('express');
 const Employee = require('../models/Employee');
+const Fingerprint = require('../models/fingerprint');
 const Attendance = require('../models/Attendance');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 
@@ -16,7 +17,7 @@ router.use(requireAdmin);
 
 /**
  * @route   POST /api/admin/employees
- * @desc    Create a new employee
+ * @desc    Create a new employee with encrypted fingerprint storage
  * @access  Admin only
  */
 router.post('/employees', async (req, res) => {
@@ -56,7 +57,7 @@ router.post('/employees', async (req, res) => {
       });
     }
 
-    // Create new employee
+    // ✅ CREATE EMPLOYEE (with simple template for backward compatibility)
     const employee = new Employee({
       name,
       employeeId,
@@ -64,7 +65,7 @@ router.post('/employees', async (req, res) => {
       department,
       phone,
       email,
-      fingerprintTemplate,
+      fingerprintTemplate, // Keep for backward compatibility
       baseLocation: {
         latitude: baseLocation.latitude,
         longitude: baseLocation.longitude,
@@ -73,6 +74,30 @@ router.post('/employees', async (req, res) => {
     });
 
     await employee.save();
+    console.log(`✅ Employee created: ${employeeId}`);
+
+    // ✅ CREATE ENCRYPTED FINGERPRINT ENTRY
+    try {
+      const fingerprint = new Fingerprint({
+        employee: employee._id,
+        employeeId: employee.employeeId,
+        fingerIndex: 1, // Default to right index finger
+        fingerName: 'RIGHT_INDEX',
+        format: 'ISO_19794_2',
+        enrolledBy: req.user.username,
+        quality: req.body.quality || null, // Optional quality score from frontend
+      });
+
+      // Set and encrypt the template
+      fingerprint.setTemplate(fingerprintTemplate);
+      await fingerprint.save();
+      
+      console.log(`✅ Encrypted fingerprint created for ${employeeId}`);
+    } catch (fingerprintError) {
+      console.error('⚠️ Warning: Failed to create encrypted fingerprint:', fingerprintError.message);
+      // Don't fail the entire request - employee is already created
+      // The simple template in Employee model will still work
+    }
 
     res.status(201).json({
       success: true,
@@ -226,7 +251,6 @@ router.put('/employees/:id', async (req, res) => {
       fingerprintTemplate,
     } = req.body;
 
-    // Find employee
     const employee = await Employee.findById(id);
     
     if (!employee) {
@@ -242,7 +266,43 @@ router.put('/employees/:id', async (req, res) => {
     if (department) employee.department = department;
     if (phone) employee.phone = phone;
     if (email) employee.email = email;
-    if (fingerprintTemplate) employee.fingerprintTemplate = fingerprintTemplate;
+    
+    // ✅ Handle fingerprint template update
+    if (fingerprintTemplate && fingerprintTemplate !== employee.fingerprintTemplate) {
+      employee.fingerprintTemplate = fingerprintTemplate;
+      
+      // Also update encrypted fingerprint
+      try {
+        // Revoke old fingerprint
+        const oldFingerprint = await Fingerprint.findOne({ 
+          employeeId: employee.employeeId,
+          status: 'ACTIVE' 
+        });
+        
+        if (oldFingerprint) {
+          oldFingerprint.revoke(req.user.username, 'Updated by admin');
+          await oldFingerprint.save();
+        }
+        
+        // Create new encrypted fingerprint
+        const newFingerprint = new Fingerprint({
+          employee: employee._id,
+          employeeId: employee.employeeId,
+          fingerIndex: 1,
+          fingerName: 'RIGHT_INDEX',
+          format: 'ISO_19794_2',
+          enrolledBy: req.user.username,
+          quality: req.body.quality || null,
+        });
+        
+        newFingerprint.setTemplate(fingerprintTemplate);
+        await newFingerprint.save();
+        
+        console.log(`✅ Fingerprint updated for ${employee.employeeId}`);
+      } catch (fpError) {
+        console.error('⚠️ Warning: Failed to update encrypted fingerprint:', fpError.message);
+      }
+    }
     
     if (baseLocation && baseLocation.latitude && baseLocation.longitude) {
       employee.baseLocation = {
@@ -278,7 +338,6 @@ router.put('/employees/:id', async (req, res) => {
     });
   }
 });
-
 /**
  * @route   DELETE /api/admin/employees/:id
  * @desc    Delete an employee
